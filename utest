@@ -11,7 +11,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="3.5.1"
+VERSION="4.0.0"
 START_TIME=$(date +%s)
 
 # --- TERMINAL WIDTH ---
@@ -87,7 +87,13 @@ usage() {
     echo -e "${BOLD}${CYAN}Unit Test Utility${NC} (utu) v ${BOLD}${RED}${VERSION}${NC}"
     echo ""
     echo -e "${BOLD}${RED}USAGE:${NC}"
-    echo -e "  utu [OPTIONS]"
+    echo -e "  utu [COMMAND] [OPTIONS]"
+    echo ""
+    echo -e "${BOLD}${RED}COMMANDS:${NC}"
+    echo -e "  run         (default) Build and run tests"
+    echo -e "  compile     Compile tests only (no execution)"
+    echo -e "  exec        Run existing binaries only (skips compilation)"
+    echo -e "  list        List available tests and compiled binaries"
     echo ""
     echo -e "${BOLD}${RED}OPTIONS:${NC}"
     echo -e "  -v          Verbose: show full output and examples in help"
@@ -129,6 +135,34 @@ usage() {
     exit 0
 }
 
+# --- SUBCOMMAND HANDLING ---
+COMMAND="run"
+if [[ $# -gt 0 ]]; then
+    case "$1" in
+        run|compile|exec|list)
+            COMMAND="$1"
+            shift
+            ;;
+        -*)
+            # If starts with -, assume default command "run"
+            ;;
+        *)
+            # Check if it's a number (for backward compat)
+            if [[ ! "$1" =~ ^[0-9] ]]; then
+                echo -e "${RED}❌ Unknown command: $1${NC}"
+                usage
+            fi
+            ;;
+    esac
+fi
+
+# Set default modes based on command
+case "$COMMAND" in
+    compile) COMPILE_ONLY=true ;;
+    exec)    STRICT_EXEC=true ;;
+    list)    LIST_ONLY=true ;;
+esac
+
 # --- PARSE ARGS ---
 NUMBERS=""
 IGNORE_NUMBERS=""
@@ -143,8 +177,9 @@ COMPACT=false
 REMOVE_TESTS=false
 HIDE_SUMMARY=false
 EXEC_ONLY=false
-COMPILE_ONLY=false
-STRICT_EXEC=false
+COMPILE_ONLY=${COMPILE_ONLY:-false}
+STRICT_EXEC=${STRICT_EXEC:-false}
+LIST_ONLY=${LIST_ONLY:-false}
 DRY_RUN=false
 QUIET_MODE=false
 JOBS=1
@@ -331,6 +366,35 @@ for f in "${FILES[@]}"; do
     TNAME=$(basename "$f" .cpp)
     matches_filter "$TNAME" && TOTAL_FILES=$((TOTAL_FILES + 1))
 done
+
+# --- LIST ONLY MODE ---
+if $LIST_ONLY; then
+    banner "AVAILABLE TESTS" "$CYAN"
+    echo -e "${BOLD}Source Files:${NC}"
+    for f in "${FILES[@]}"; do
+        TNAME=$(basename "$f" .cpp)
+        if matches_filter "$TNAME"; then
+            echo -e "  ${DIM}-${NC} ${CYAN}${f}${NC}"
+        fi
+    done
+
+    if [[ -d "${EXEC_DIR}" ]]; then
+        echo ""
+        echo -e "${BOLD}Compiled Binaries:${NC}"
+        found_bin=false
+        for b in "${EXEC_DIR}"utest*; do
+            [[ -x "$b" ]] || continue
+            found_bin=true
+            BName=$(basename "$b")
+            if matches_filter "$BName"; then
+                echo -e "  ${DIM}-${NC} ${GREEN}${BName}${NC}"
+            fi
+        done
+        $found_bin || echo -e "  ${DIM}(none)${NC}"
+    fi
+    echo ""
+    exit 0
+fi
 
 # ============================================================
 #  COMPILE PHASE
