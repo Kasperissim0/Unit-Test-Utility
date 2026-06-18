@@ -1,7 +1,5 @@
 #!/bin/bash
 
-# TODO Should Probably Make This A Git Directory / Submodule
-
 # --- COLORS ---
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
@@ -11,7 +9,7 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-VERSION="4.0.0"
+VERSION="4.3.5"
 START_TIME=$(date +%s)
 
 # --- TERMINAL WIDTH ---
@@ -99,7 +97,7 @@ usage() {
     echo -e "  -v          Verbose: show full output and examples in help"
     echo -e "  -n <nums>   Run only tests by number, comma-separated (e.g. -n 3,5,8)"
     echo -e "  -i <nums>   Ignore tests by number, comma-separated (e.g. -i 3,5,8)"
-    echo -e "  -f <0|1>    Result filter: 0 for ${RED}FAILED${NC}, 1 for ${GREEN}PASSED${NC}"
+    echo -e "  -f <0|1>    Result filter: 1 for ${RED}FAILED${NC}, 0 for ${GREEN}PASSED${NC}"
     echo -e "  -l <file>   Log results to <file>"
     echo -e "  -j          JSON output: print results in JSON format at the end"
     echo -e "  -s          Per-file compile status + summary (no test output)"
@@ -115,22 +113,33 @@ usage() {
     echo -e "  -H          Hide: hides the summary at the end"
     echo -e "  -d          Delete: deletes the ${EXEC_DIR} directory after execution"
     echo -e "  -r          Recursive search: finds tests in subdirectories"
+    echo -e "  -F <file>   File: set the name of the source file to compile alongside tests. Defaults to 'miniatur.cpp'. "
+    echo -e "              Can be a header or source file. If -r is enabled, it searches recursively for this file."
     echo ""
     echo -e "  -V          Show version"
-    echo -e "  -h          Show this help message (run with -v to see usage examples)"
+    echo -e "  -h          Show this help message (run with -v to see detailed usage and examples)"
     echo -e "  -u          Update: runs install.sh from script directory"
     
     if $VERBOSE; then
         echo ""
+        echo -e "${BOLD}${RED}DETAILED DOCUMENTATION:${NC}"
+        echo -e "  ${BOLD}-F <file>${NC}"
+        echo -e "    Specifies the 'Main Source' or library file that tests depend on. By default, 'utu' looks"
+        echo -e "    for 'miniatur.cpp' in the current or test directory. Use -F to override this (e.g., -F vector.hpp)."
+        echo -e "    When combined with ${BOLD}-r${NC}, if the file is not found locally, 'utu' will scan subdirectories"
+        echo -e "    recursively and use the first match it finds. This is ideal for project structures where"
+        echo -e "    source files are kept in 'src/' while tests are in 'tests/'."
+        echo ""
         echo -e "${BOLD}${RED}EXAMPLES:${NC}"
-        echo -e "  utu -of 0              # Rebuild only changed files, run in parallel, show only failures"
+        echo -e "  utu -of 1              # Rebuild only changed files, run in parallel, show only failures"
         echo -e "  utu -vn 1,3,5          # Run tests 1, 3, and 5 with full output including print statements"
         echo -e "  utu -oqj               # Optimal build, run quietly, output final results in JSON format"
         echo -e "  utu -EHi 2,4           # Run only existing binaries, skip tests 2 and 4, hide the final summary"
         echo -e "  utu -cpl build.log     # Force recompile all missing files in parallel, log the output to a file"
         echo -e "  utu -ton 10            # Dry run: show what would happen when optimally running test 10"
         echo -e "  utu -odS               # Build and run optimally, then delete the tests folder, showing only a progress bar"
-        echo -e "  utu -Sobqrf 0          # Optimal recursive build, run quietly, show only failed execution output, brief summary (no file lists)"
+        echo -e "  utu -Sobqrf 1          # Optimal recursive build, run quietly, show only failed execution output, brief summary (no file lists)"
+        echo -e "  utu -F vector.hpp -r   # Compile tests using 'vector.hpp' as the source, searching recursively for its location"
     fi
     exit 0
 }
@@ -186,12 +195,13 @@ JOBS=1
 OPTIMAL=false
 BRIEF_SUMMARY=false
 SHOW_HELP=false
+TARGET_SOURCE_FILE="miniatur.cpp"
 
 
 EXEC_DIR='executables/'
 
 
-while getopts "n:i:f:rdvl:sVShuHeEctopjqb" opt; do
+while getopts "n:i:f:rdvl:sVShuHeEctopjqbF:" opt; do
     case $opt in
         n)
             NUMBERS="$OPTARG"
@@ -208,8 +218,8 @@ while getopts "n:i:f:rdvl:sVShuHeEctopjqb" opt; do
             done
             ;;
         f)
-            if [[ "$OPTARG" == "0" ]]; then FAILED_ONLY=true;
-            elif [[ "$OPTARG" == "1" ]]; then PASSED_ONLY=true;
+            if [[ "$OPTARG" == "1" ]]; then FAILED_ONLY=true;
+            elif [[ "$OPTARG" == "0" ]]; then PASSED_ONLY=true;
             else
                 echo -e "${RED}❌ Invalid result filter: $OPTARG (use 0 or 1)${NC}"
                 exit 1
@@ -231,6 +241,7 @@ while getopts "n:i:f:rdvl:sVShuHeEctopjqb" opt; do
         p) JOBS=$(get_cores) ;;
         b) BRIEF_SUMMARY=true ;;
         j) JSON_OUTPUT=true ;;
+        F) TARGET_SOURCE_FILE="$OPTARG" ;;
         V) echo -e "😎 Latest Version: ${RED}$VERSION${NC}"; exit 0 ;;
         u)
             SOURCE="${BASH_SOURCE[0]}"
@@ -508,6 +519,7 @@ if [[ ${#FILES_TO_COMPILE[@]} -gt 0 ]]; then
 
     TOTAL_TO_COMPILE=${#FILES_TO_COMPILE[@]}
     CURRENT=0
+    CACHED_SOURCE_PATH=""
     
     # Create temp dir for parallel output buffering
     TEMP_OUT_DIR=$(mktemp -d)
@@ -517,16 +529,29 @@ if [[ ${#FILES_TO_COMPILE[@]} -gt 0 ]]; then
         TDIR=$(dirname "$f")
         CURRENT=$((CURRENT + 1))
 
+        EXTRA_SOURCES=""
+        if [[ -f "$TARGET_SOURCE_FILE" ]]; then
+            EXTRA_SOURCES="$TARGET_SOURCE_FILE"
+        elif [[ -f "$TDIR/$TARGET_SOURCE_FILE" ]] && [[ "$TDIR" != "." ]]; then
+            EXTRA_SOURCES="$TDIR/$TARGET_SOURCE_FILE"
+        elif $RECURSIVE; then
+            # Use cached path if already found, otherwise search
+            if [[ -z "$CACHED_SOURCE_PATH" ]]; then
+                # Search for the source file recursively
+                CACHED_SOURCE_PATH=$(find . -name "$TARGET_SOURCE_FILE" -type f | head -n 1)
+                if [[ -n "$CACHED_SOURCE_PATH" ]] && $VERBOSE && ! $QUIET_MODE; then
+                    echo -e "${DIM}  ▸ Resolved $TARGET_SOURCE_FILE to $CACHED_SOURCE_PATH${NC}"
+                fi
+            fi
+            EXTRA_SOURCES="$CACHED_SOURCE_PATH"
+        fi
+
         if $DRY_RUN; then
-            log "  ${DIM}[DRY RUN] Would compile $f -> ${EXEC_DIR}${TNAME}${NC}"
+            log "  ${DIM}[DRY RUN] Would compile $f ${EXTRA_SOURCES:+($EXTRA_SOURCES) }-> ${EXEC_DIR}${TNAME}${NC}"
             COMPILE_OK=$((COMPILE_OK + 1))
             COMPILE_OK_LIST+=("$f")
             continue
         fi
-
-        EXTRA_SOURCES=""
-        [[ -f "miniatur.cpp" ]] && EXTRA_SOURCES="miniatur.cpp"
-        [[ -f "$TDIR/miniatur.cpp" ]] && [[ "$TDIR" != "." ]] && EXTRA_SOURCES="$TDIR/miniatur.cpp"
 
         # Compilation task function
         run_compile() {
@@ -887,7 +912,7 @@ Compilation Rate: ${BOLD}${CYAN}${COMPILE_SUCCESS_RATE}%${NC} ${DIM}(${COMPILE_S
         STATS_BLOCK+="\n
 Test Cases:   ${STAT_TC_TOTAL} total | ${GREEN}${STAT_TC_PASS} passed${NC} | ${RED}${STAT_TC_FAIL} failed${NC} | ${DIM}${STAT_TC_SKIP} skipped${NC}
 Assertions:   ${TOTAL_AS} total | ${GREEN}${STAT_AS_PASS} passed${NC} | ${RED}${STAT_AS_FAIL} failed${NC}
-Success Rate: ${BOLD}${CYAN}${SUCCESS_RATE}%${NC}
+Test Success Rate: ${BOLD}${CYAN}${SUCCESS_RATE}%${NC}
 ────────────────────────────────"
 
         # if [[ ${#SLOWEST_TESTS[@]} -gt 0 ]]; then
